@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Barber Heatmap — Napoli</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Leaflet.heat -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        #map { height: 100%; width: 100%; }
+
+        /* Header overlay */
+        #header {
+            position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+            z-index: 1000; background: rgba(255,255,255,.92);
+            padding: 10px 22px; border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,.15);
+            text-align: center; pointer-events: none;
+            backdrop-filter: blur(6px);
+        }
+        #header h1 { font-size: 1.15rem; font-weight: 600; color: #222; }
+        #header p { font-size: .78rem; color: #666; margin-top: 2px; }
+
+        /* Legend */
+        #legend {
+            position: absolute; bottom: 30px; right: 16px;
+            z-index: 1000; background: rgba(255,255,255,.9);
+            padding: 10px 14px; border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0,0,0,.12);
+            font-size: .72rem; color: #444; min-width: 130px;
+        }
+        #legend .title { font-weight: 600; margin-bottom: 4px; text-align: center; }
+        #legend .gradient {
+            height: 14px; width: 100%;
+            background: linear-gradient(to right, #0000ff, #00ff00, #ffff00, #ff8800, #ff0000);
+            border-radius: 4px; margin: 4px 0;
+        }
+        #legend .labels { display: flex; justify-content: space-between; }
+        #legend .labels span:first-child { color: #00f; }
+        #legend .labels span:last-child { color: #f00; }
+
+        /* Spinner */
+        #loader {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            z-index: 9999;
+        }
+        .spinner {
+            width: 40px; height: 40px;
+            border: 4px solid rgba(0,0,0,.1); border-top-color: #2563eb;
+            border-radius: 50%; animation: spin .7s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Stats badge */
+        #stats {
+            position: absolute; bottom: 30px; left: 16px;
+            z-index: 1000; background: rgba(255,255,255,.9);
+            padding: 8px 14px; border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0,0,0,.12);
+            font-size: .75rem; color: #444;
+        }
+
+        /* Error toast */
+        #error-toast {
+            position: absolute; top: 80px; left: 50%; transform: translateX(-50%);
+            z-index: 9999; background: #dc2626; color: #fff;
+            padding: 10px 20px; border-radius: 8px;
+            font-size: .85rem; box-shadow: 0 4px 16px rgba(220,38,38,.3);
+            display: none; max-width: 90vw; text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+
+    <div id="header">
+        <h1>✂️ Distanza dal Barbiere più vicino — Napoli</h1>
+        <p>Più caldo = più lontano da un barbiere</p>
+    </div>
+
+    <div id="loader"><div class="spinner"></div></div>
+    <div id="error-toast"></div>
+
+    <div id="legend">
+        <div class="title">Distanza a piedi (approssimata)</div>
+        <div class="gradient"></div>
+        <div class="labels">
+            <span>Vicino</span>
+            <span>Lontano</span>
+        </div>
+    </div>
+
+    <div id="stats"></div>
+
+    <script>
+        // ─── Initialise map ────────────────────────────────────────────────
+        const map = L.map('map', {
+            center: [40.8359, 14.2488],
+            zoom: 13,
+            zoomControl: true,
+        });
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://openstreetmap.org">OpenStreetMap</a>',
+            maxZoom: 19,
+        }).addTo(map);
+
+        // ─── State ────────────────────────────────────────────────────────
+        const barberMarkers = L.markerClusterGroup
+            ? L.markerClusterGroup()       // will use if available (not loaded)
+            : L.layerGroup().addTo(map);
+
+        let heatLayer = null;
+        const loaderEl = document.getElementById('loader');
+        const errorEl = document.getElementById('error-toast');
+        const statsEl = document.getElementById('stats');
+
+        // ─── Helpers ──────────────────────────────────────────────────────
+        function showLoader(v) { loaderEl.style.display = v ? 'block' : 'none'; }
+
+        function showError(msg) {
+            errorEl.textContent = msg;
+            errorEl.style.display = 'block';
+            setTimeout(() => { errorEl.style.display = 'none'; }, 8000);
+        }
+
+        // ─── Fetch barbers ────────────────────────────────────────────────
+        async function loadBarbers() {
+            const resp = await fetch('/api/barbers');
+            if (!resp.ok) throw new Error('Impossibile caricare i barbieri');
+            const data = await resp.json();
+            return data.barbers;
+        }
+
+        // ─── Fetch heatmap data ───────────────────────────────────────────
+        async function loadHeatmap() {
+            const resp = await fetch('/api/heatmap');
+            if (!resp.ok) throw new Error('Impossibile caricare la mappa di calore');
+            const data = await resp.json();
+            return data;
+        }
+
+        // ─── Render heatmap ───────────────────────────────────────────────
+        function renderHeatmap(points, maxDistance) {
+            // Leaflet.heat expects [lat, lng, intensity] with intensity 0-1
+            const heatData = points.map(p => {
+                const intensity = maxDistance > 0
+                    ? Math.min(p.distance_m / maxDistance, 1)
+                    : 0;
+                return [p.lat, p.lng, intensity];
+            });
+
+            if (heatLayer) map.removeLayer(heatLayer);
+
+            heatLayer = L.heatLayer(heatData, {
+                radius: 22,
+                blur: 16,
+                maxZoom: 15,
+                max: 1,
+                gradient: {
+                    0.0: '#0000ff',   // blue  — very close
+                    0.2: '#00ccff',   // cyan
+                    0.4: '#00ff00',   // green
+                    0.6: '#ffff00',   // yellow
+                    0.8: '#ff8800',   // orange
+                    1.0: '#ff0000',   // red   — very far
+                },
+            }).addTo(map);
+        }
+
+        // ─── Render barber markers ────────────────────────────────────────
+        function renderBarbers(barbers) {
+            barbers.forEach(b => {
+                const icon = L.divIcon({
+                    className: '',
+                    html: '<div style="background:#2563eb;color:#fff;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:14px;border:2px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,.25);">✂️</div>',
+                    iconSize: [24, 24],
+                    iconAnchor: [12, 12],
+                });
+                const marker = L.marker([b.lat, b.lng], { icon })
+                    .bindPopup(`<b>${b.name}</b><br>${b.address}`);
+                marker.addTo(map);
+            });
+        }
+
+        // ─── Update stats ────────────────────────────────────────────────
+        function updateStats(barberCount, gridCount, maxDist) {
+            let distStr = maxDist >= 1000
+                ? `${(maxDist / 1000).toFixed(1)} km`
+                : `${Math.round(maxDist)} m`;
+            statsEl.innerHTML = `
+                <strong>${barberCount}</strong> barbieri ·
+                <strong>${gridCount.toLocaleString()}</strong> punti griglia ·
+                max dist: <strong>${distStr}</strong>
+            `;
+        }
+
+        // ─── Main ─────────────────────────────────────────────────────────
+        async function init() {
+            showLoader(true);
+            try {
+                const [barbers, heatmap] = await Promise.all([loadBarbers(), loadHeatmap()]);
+
+                if (!barbers || barbers.length === 0) {
+                    showError('Nessun barbiere trovato. Controlla la chiave API.');
+                    showLoader(false);
+                    return;
+                }
+
+                renderBarbers(barbers);
+                renderHeatmap(heatmap.points, heatmap.max_distance_m);
+                updateStats(barbers.length, heatmap.count, heatmap.max_distance_m);
+
+                // Fit map to show all barbers
+                if (barbers.length > 0) {
+                    const bounds = L.latLngBounds(barbers.map(b => [b.lat, b.lng]));
+                    map.fitBounds(bounds.pad(0.1));
+                }
+            } catch (err) {
+                console.error(err);
+                showError('Errore di caricamento: ' + err.message);
+            } finally {
+                showLoader(false);
+            }
+        }
+
+        // ─── Start ────────────────────────────────────────────────────────
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
