@@ -6,6 +6,8 @@ All API results cached to disk — zero ongoing API costs after first run.
 Sea points excluded via Overpass-admin boundary (cached forever).
 """
 
+import base64
+import io
 import json
 import math
 import os
@@ -15,6 +17,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 import googlemaps
+from PIL import Image
 from flask import Flask, jsonify, send_from_directory
 from flask import request as flask_request
 
@@ -63,7 +66,7 @@ GRID_LAT_MIN = 40.77
 GRID_LAT_MAX = 40.87
 GRID_LNG_MIN = 14.15
 GRID_LNG_MAX = 14.30
-GRID_STEP_M = 100  # 100 m grid for finer detail
+GRID_STEP_M = 20   # 20 m grid — fine detail, computed once, cached to disk
 
 
 # ===================================================================
@@ -157,36 +160,42 @@ def _fetch_naples_boundary() -> list[list[tuple[float, float]]] | None:
 
 # ── rough fallback polygon if Overpass is unreachable ──────────────
 _ROUGH_NAPLES_POLYGON: list[tuple[float, float]] = [
-    # ── coastline (south edge, west → east) ──
-    # Starting west of Bagnoli, going east along the shore
-    (40.805, 14.148), (40.806, 14.155), (40.807, 14.162),
-    (40.808, 14.168), (40.809, 14.174),  # Bagnoli / Coroglio
-    # Posillipo peninsula — extends south into the bay
-    (40.809, 14.178), (40.810, 14.183), (40.811, 14.188),
-    (40.813, 14.193), (40.815, 14.198), (40.818, 14.203),
+    # ═══════════════════════════════════════════════════════════════
+    #  COASTLINE — generous southern boundary
+    #  Purposely dips WELL south of the actual coast to ensure no
+    #  coastal neighbourhoods (Posillipo, S.Ferdinando, etc.) are cut off.
+    # ═══════════════════════════════════════════════════════════════
+    # Bagnoli / Coroglio (western edge)
+    (40.800, 14.145), (40.801, 14.152), (40.802, 14.160),
+    (40.803, 14.167), (40.804, 14.173),
+    # Posillipo peninsula — dips far south
+    (40.804, 14.178), (40.803, 14.183), (40.803, 14.187),
+    (40.804, 14.191), (40.806, 14.195), (40.808, 14.198),
+    # Posillipo curves back north toward Mergellina
+    (40.811, 14.202), (40.815, 14.206),
     # Mergellina / Piedigrotta
-    (40.822, 14.210), (40.825, 14.216), (40.827, 14.222),
-    # Chiaia / Santa Lucia
-    (40.830, 14.228), (40.833, 14.234), (40.835, 14.240),
+    (40.819, 14.211), (40.823, 14.217), (40.826, 14.223),
+    # Chiaia / Santa Lucia (dip south again for the port area)
+    (40.829, 14.229), (40.832, 14.235), (40.834, 14.240),
     # San Ferdinando / Porto
-    (40.837, 14.245), (40.839, 14.250), (40.841, 14.255),
+    (40.836, 14.245), (40.838, 14.250), (40.840, 14.255),
     # Mercato / Porto Orientale
-    (40.844, 14.261), (40.847, 14.267), (40.850, 14.273),
-    # San Giovanni a Teduccio / east coast
-    (40.853, 14.279), (40.856, 14.285), (40.859, 14.290),
-    (40.862, 14.294),
+    (40.842, 14.260), (40.845, 14.266), (40.848, 14.272),
+    # San Giovanni a Teduccio / eastern coast
+    (40.851, 14.278), (40.854, 14.284), (40.857, 14.289),
+    (40.860, 14.293),
     # ── east / north-east suburbs ──
-    (40.866, 14.298), (40.870, 14.301), (40.874, 14.303),
-    (40.878, 14.304), (40.882, 14.302), (40.885, 14.298),
+    (40.864, 14.297), (40.868, 14.300), (40.873, 14.303),
+    (40.877, 14.304), (40.881, 14.303), (40.885, 14.300),
     # ── north (inland) — generous buffer ──
-    (40.887, 14.292), (40.888, 14.284), (40.888, 14.274),
-    (40.887, 14.262), (40.886, 14.250), (40.884, 14.238),
-    (40.882, 14.226), (40.879, 14.215), (40.876, 14.204),
-    (40.872, 14.194), (40.868, 14.185), (40.863, 14.177),
-    (40.858, 14.170), (40.852, 14.165), (40.846, 14.160),
+    (40.888, 14.295), (40.889, 14.286), (40.889, 14.276),
+    (40.888, 14.264), (40.887, 14.252), (40.885, 14.240),
+    (40.883, 14.228), (40.880, 14.217), (40.877, 14.206),
+    (40.873, 14.196), (40.869, 14.187), (40.864, 14.179),
+    (40.859, 14.172), (40.853, 14.166), (40.847, 14.162),
     # ── west / north-west suburbs ──
-    (40.840, 14.156), (40.833, 14.153), (40.826, 14.151),
-    (40.818, 14.150), (40.811, 14.149),
+    (40.841, 14.158), (40.834, 14.155), (40.827, 14.152),
+    (40.819, 14.150), (40.812, 14.148), (40.806, 14.146),
 ]
 
 
@@ -365,6 +374,7 @@ def build_heatmap_grid(barbers: list[dict],
                    default=0)
 
     result = {
+        "count": len(points),
         "points": points,
         "cols": cols,
         "rows": rows,
@@ -377,6 +387,74 @@ def build_heatmap_grid(barbers: list[dict],
     }
     _write_cache(cache_path, result)
     return result
+
+
+# ===================================================================
+#  RENDER GRID IMAGE  (server-side canvas via Pillow)
+# ===================================================================
+def _dist_to_color(distance_m: float | None, max_dist: float):
+    """Match the frontend distToCSS logic — returns RGBA tuple."""
+    if distance_m is None:
+        return (0, 0, 0, 0)  # transparent for sea
+    t = min(distance_m / max_dist, 1) if max_dist > 0 else 0
+    curved = t ** 0.6
+    # hue: 0° = red (close), 240° = blue (far)
+    hue = 240 * curved  # 0-240 degrees
+    # Convert HSL to RGB
+    h = hue / 360
+    r, g, b = _hsl_to_rgb(h, 0.5, 0.5)
+    return (int(r * 255), int(g * 255), int(b * 255), 255)
+
+
+def _hsl_to_rgb(h, s, l):
+    """HSL → RGB (all values 0-1)."""
+    if s == 0:
+        return (l, l, l)
+    def _hue_to_rgb(p, q, t):
+        if t < 0: t += 1
+        if t > 1: t -= 1
+        if t < 1/6: return p + (q - p) * 6 * t
+        if t < 1/2: return q
+        if t < 2/3: return p + (q - p) * (2/3 - t) * 6
+        return p
+    q = l * (1 + s) if l < 0.5 else l + s - l * s
+    p = 2 * l - q
+    return (_hue_to_rgb(p, q, h + 1/3),
+            _hue_to_rgb(p, q, h),
+            _hue_to_rgb(p, q, h - 1/3))
+
+
+def render_grid_image(grid_result: dict) -> str:
+    """Render the grid to a PNG and return a data URL."""
+    points = grid_result["points"]
+    cols = grid_result["cols"]
+    rows = grid_result["rows"]
+    max_dist = grid_result["max_distance_m"]
+
+    if not points or cols == 0 or rows == 0:
+        return ""
+
+    CELL = 2  # pixels per cell
+    img = Image.new("RGBA", (cols * CELL, rows * CELL), (0, 0, 0, 0))
+    pixels = img.load()
+
+    for i, p in enumerate(points):
+        col = i % cols
+        row = i // cols
+        color = _dist_to_color(p["distance_m"], max_dist)
+        # Fill the CELL×CELL block
+        for dx in range(CELL):
+            for dy in range(CELL):
+                px = col * CELL + dx
+                py = row * CELL + dy
+                if px < img.width and py < img.height:
+                    pixels[px, py] = color
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
 
 
 # ===================================================================
@@ -407,7 +485,19 @@ def api_heatmap():
 
     result = build_heatmap_grid(barbers, lat_min, lat_max,
                                 lng_min, lng_max, step)
-    return jsonify(result)
+
+    # Render the grid to a PNG image (avoids sending 350k+ points over the wire)
+    image_url = render_grid_image(result)
+
+    return jsonify({
+        "count": result["count"],
+        "max_distance_m": result["max_distance_m"],
+        "cols": result["cols"],
+        "rows": result["rows"],
+        "bounds": result["bounds"],
+        "step_m": result["step_m"],
+        "image": image_url,
+    })
 
 
 # ===================================================================

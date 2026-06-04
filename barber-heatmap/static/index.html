@@ -141,47 +141,19 @@
             return await resp.json();
         }
 
-        // ─── Distance → colour (HSL) ──────────────────────────────────────
-        function distToCSS(distance, maxDist) {
-            if (distance === null) return 'rgba(0,0,0,0)';  // sea = transparent
-            const t = maxDist > 0 ? Math.min(distance / maxDist, 1) : 0;
-            // hue: 0° (red) → 240° (blue)   saturation 100%, lightness 50%
-            // Red = close to barber, Blue = far from barber
-            // Perceptual curve to amplify differences in the 0-1km range
-            const curved = Math.pow(t, 0.6);
-            const hue = 240 * curved;
-            return `hsl(${hue}, 100%, 50%)`;
-        }
-
-        // ─── Render heatmap as a canvas ImageOverlay ──────────────────────
+        // ─── Render heatmap — uses server-rendered image ──────────────────
         function renderHeatmapGrid(data) {
             if (gridOverlay) map.removeLayer(gridOverlay);
 
-            const { points, cols, rows, bounds, max_distance_m } = data;
-            if (!points || points.length === 0) return;
+            const { image, bounds } = data;
+            if (!image) return;
 
-            const CELL = 8; // pixels per grid cell on the canvas
-            const canvas = document.createElement('canvas');
-            canvas.width = cols * CELL;
-            canvas.height = rows * CELL;
-            const ctx = canvas.getContext('2d');
-
-            // Draw each grid cell
-            for (let i = 0; i < points.length; i++) {
-                const p = points[i];
-                const col = i % cols;
-                const row = Math.floor(i / cols);
-                ctx.fillStyle = distToCSS(p.distance_m, max_distance_m);
-                ctx.fillRect(col * CELL, row * CELL, CELL, CELL);
-            }
-
-            // Leaflet ImageOverlay bounds: [[south, west], [north, east]]
             const overlayBounds = [
                 [bounds.lat_min, bounds.lng_min],
                 [bounds.lat_max, bounds.lng_max],
             ];
 
-            gridOverlay = L.imageOverlay(canvas.toDataURL(), overlayBounds, {
+            gridOverlay = L.imageOverlay(image, overlayBounds, {
                 opacity: 0.75,
                 interactive: false,
             }).addTo(map);
@@ -228,7 +200,7 @@
 
                 renderBarbers(barbers);
                 renderHeatmapGrid(heatmap);
-                updateStats(barbers.length, heatmap.points.length, heatmap.max_distance_m);
+                updateStats(barbers.length, heatmap.count, heatmap.max_distance_m);
 
                 // Fit map to grid bounds
                 const b = heatmap.bounds;

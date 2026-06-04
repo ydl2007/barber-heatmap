@@ -2,3 +2,4 @@ flask>=3.0
 python-dotenv>=1.0
 googlemaps>=4.10
 requests>=2.31
+Pillow>=11.0
