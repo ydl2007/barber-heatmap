@@ -63,9 +63,9 @@ NAPLES_RADIUS = 15_000  # metres
 
 # ── Grid defaults ──────────────────────────────────────────────────────────
 GRID_LAT_MIN = 40.77
-GRID_LAT_MAX = 40.87
-GRID_LNG_MIN = 14.15
-GRID_LNG_MAX = 14.30
+GRID_LAT_MAX = 40.92
+GRID_LNG_MIN = 14.12
+GRID_LNG_MAX = 14.36
 GRID_STEP_M = 20   # 20 m grid — fine detail, computed once, cached to disk
 
 
