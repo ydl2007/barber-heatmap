@@ -7,9 +7,7 @@
 
     <!-- Leaflet CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <!-- Leaflet.heat -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
 
     <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -34,17 +32,17 @@
             z-index: 1000; background: rgba(255,255,255,.9);
             padding: 10px 14px; border-radius: 8px;
             box-shadow: 0 2px 12px rgba(0,0,0,.12);
-            font-size: .72rem; color: #444; min-width: 130px;
+            font-size: .72rem; color: #444; min-width: 140px;
         }
         #legend .title { font-weight: 600; margin-bottom: 4px; text-align: center; }
         #legend .gradient {
             height: 14px; width: 100%;
-            background: linear-gradient(to right, #0000ff, #00ff00, #ffff00, #ff8800, #ff0000);
+            background: linear-gradient(to right, #ff0000, #ff8800, #ffee00, #00ff66, #00ccff, #0033ff);
             border-radius: 4px; margin: 4px 0;
         }
         #legend .labels { display: flex; justify-content: space-between; }
-        #legend .labels span:first-child { color: #00f; }
-        #legend .labels span:last-child { color: #f00; }
+        #legend .labels span:first-child { color: #f00; }
+        #legend .labels span:last-child { color: #0033ff; }
 
         /* Spinner */
         #loader {
@@ -83,14 +81,14 @@
 
     <div id="header">
         <h1>✂️ Distanza dal Barbiere più vicino — Napoli</h1>
-        <p>Più caldo = più lontano da un barbiere</p>
+        <p>Rosso = vicino · Blu = lontano · Grigio = mare</p>
     </div>
 
     <div id="loader"><div class="spinner"></div></div>
     <div id="error-toast"></div>
 
     <div id="legend">
-        <div class="title">Distanza a piedi (approssimata)</div>
+        <div class="title">Distanza (linea d'aria)</div>
         <div class="gradient"></div>
         <div class="labels">
             <span>Vicino</span>
@@ -114,11 +112,7 @@
         }).addTo(map);
 
         // ─── State ────────────────────────────────────────────────────────
-        const barberMarkers = L.markerClusterGroup
-            ? L.markerClusterGroup()       // will use if available (not loaded)
-            : L.layerGroup().addTo(map);
-
-        let heatLayer = null;
+        let gridOverlay = null;
         const loaderEl = document.getElementById('loader');
         const errorEl = document.getElementById('error-toast');
         const statsEl = document.getElementById('stats');
@@ -144,35 +138,52 @@
         async function loadHeatmap() {
             const resp = await fetch('/api/heatmap');
             if (!resp.ok) throw new Error('Impossibile caricare la mappa di calore');
-            const data = await resp.json();
-            return data;
+            return await resp.json();
         }
 
-        // ─── Render heatmap ───────────────────────────────────────────────
-        function renderHeatmap(points, maxDistance) {
-            // Leaflet.heat expects [lat, lng, intensity] with intensity 0-1
-            const heatData = points.map(p => {
-                const intensity = maxDistance > 0
-                    ? Math.min(p.distance_m / maxDistance, 1)
-                    : 0;
-                return [p.lat, p.lng, intensity];
-            });
+        // ─── Distance → colour (HSL) ──────────────────────────────────────
+        function distToCSS(distance, maxDist) {
+            if (distance === null) return 'rgba(0,0,0,0)';  // sea = transparent
+            const t = maxDist > 0 ? Math.min(distance / maxDist, 1) : 0;
+            // hue: 0° (red) → 240° (blue)   saturation 100%, lightness 50%
+            // Red = close to barber, Blue = far from barber
+            // Perceptual curve to amplify differences in the 0-1km range
+            const curved = Math.pow(t, 0.6);
+            const hue = 240 * curved;
+            return `hsl(${hue}, 100%, 50%)`;
+        }
 
-            if (heatLayer) map.removeLayer(heatLayer);
+        // ─── Render heatmap as a canvas ImageOverlay ──────────────────────
+        function renderHeatmapGrid(data) {
+            if (gridOverlay) map.removeLayer(gridOverlay);
 
-            heatLayer = L.heatLayer(heatData, {
-                radius: 22,
-                blur: 16,
-                maxZoom: 15,
-                max: 1,
-                gradient: {
-                    0.0: '#0000ff',   // blue  — very close
-                    0.2: '#00ccff',   // cyan
-                    0.4: '#00ff00',   // green
-                    0.6: '#ffff00',   // yellow
-                    0.8: '#ff8800',   // orange
-                    1.0: '#ff0000',   // red   — very far
-                },
+            const { points, cols, rows, bounds, max_distance_m } = data;
+            if (!points || points.length === 0) return;
+
+            const CELL = 8; // pixels per grid cell on the canvas
+            const canvas = document.createElement('canvas');
+            canvas.width = cols * CELL;
+            canvas.height = rows * CELL;
+            const ctx = canvas.getContext('2d');
+
+            // Draw each grid cell
+            for (let i = 0; i < points.length; i++) {
+                const p = points[i];
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                ctx.fillStyle = distToCSS(p.distance_m, max_distance_m);
+                ctx.fillRect(col * CELL, row * CELL, CELL, CELL);
+            }
+
+            // Leaflet ImageOverlay bounds: [[south, west], [north, east]]
+            const overlayBounds = [
+                [bounds.lat_min, bounds.lng_min],
+                [bounds.lat_max, bounds.lng_max],
+            ];
+
+            gridOverlay = L.imageOverlay(canvas.toDataURL(), overlayBounds, {
+                opacity: 0.75,
+                interactive: false,
             }).addTo(map);
         }
 
@@ -216,14 +227,12 @@
                 }
 
                 renderBarbers(barbers);
-                renderHeatmap(heatmap.points, heatmap.max_distance_m);
-                updateStats(barbers.length, heatmap.count, heatmap.max_distance_m);
+                renderHeatmapGrid(heatmap);
+                updateStats(barbers.length, heatmap.points.length, heatmap.max_distance_m);
 
-                // Fit map to show all barbers
-                if (barbers.length > 0) {
-                    const bounds = L.latLngBounds(barbers.map(b => [b.lat, b.lng]));
-                    map.fitBounds(bounds.pad(0.1));
-                }
+                // Fit map to grid bounds
+                const b = heatmap.bounds;
+                map.fitBounds([[b.lat_min, b.lng_min], [b.lat_max, b.lng_max]]);
             } catch (err) {
                 console.error(err);
                 showError('Errore di caricamento: ' + err.message);
