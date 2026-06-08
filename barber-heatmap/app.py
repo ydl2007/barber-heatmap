@@ -56,10 +56,19 @@ BARBER_KEYWORDS = [
     "barbiere uomo",
     "parrucchiere uomo",
     "barber shop",
+    "barbetta",
+    "rasatura",
 ]
 
 NAPLES_CENTER = (40.8359, 14.2488)
 NAPLES_RADIUS = 15_000  # metres
+
+# ── Grid search points for nearby search (covers the whole comune) ──
+SEARCH_GRID = [
+    (40.80, 14.18), (40.80, 14.24), (40.80, 14.30),
+    (40.84, 14.18), (40.84, 14.24), (40.84, 14.30),
+    (40.88, 14.18), (40.88, 14.24), (40.88, 14.30),
+]
 
 # ── Grid defaults ──────────────────────────────────────────────────────────
 GRID_LAT_MIN = 40.77
@@ -242,6 +251,7 @@ def search_barbers() -> list[dict]:
     seen: set[tuple[float, float]] = set()
     barbers: list[dict] = []
 
+    # ── 1. Text search with Italian keywords ───────────────────────
     for kw in BARBER_KEYWORDS:
         try:
             result = gmaps.places(
@@ -250,18 +260,7 @@ def search_barbers() -> list[dict]:
                 radius=NAPLES_RADIUS,
                 language="it",
             )
-            for place in result.get("results", []):
-                loc = place["geometry"]["location"]
-                key = (round(loc["lat"], 5), round(loc["lng"], 5))
-                if key not in seen:
-                    seen.add(key)
-                    barbers.append({
-                        "name": place.get("name", ""),
-                        "address": place.get("vicinity",
-                                             place.get("formatted_address", "")),
-                        "lat": loc["lat"],
-                        "lng": loc["lng"],
-                    })
+            _extract_places(result, seen, barbers)
             while "next_page_token" in result:
                 time.sleep(2)
                 result = gmaps.places(
@@ -271,24 +270,52 @@ def search_barbers() -> list[dict]:
                     language="it",
                     page_token=result["next_page_token"],
                 )
-                for place in result.get("results", []):
-                    loc = place["geometry"]["location"]
-                    key = (round(loc["lat"], 5), round(loc["lng"], 5))
-                    if key not in seen:
-                        seen.add(key)
-                        barbers.append({
-                            "name": place.get("name", ""),
-                            "address": place.get("vicinity",
-                                                 place.get("formatted_address", "")),
-                            "lat": loc["lat"],
-                            "lng": loc["lng"],
-                        })
+                _extract_places(result, seen, barbers)
         except Exception as exc:
-            print(f"Places search for '{kw}' failed: {exc}")
+            print(f"Places text search '{kw}' failed: {exc}")
+
+    # ── 2. Nearby search with type=hair_care at grid points ────────
+    for lat, lng in SEARCH_GRID:
+        try:
+            result = gmaps.places_nearby(
+                location=(lat, lng),
+                radius=5000,          # 5 km radius per grid point
+                type="hair_care",
+                language="it",
+            )
+            _extract_places(result, seen, barbers)
+            while "next_page_token" in result:
+                time.sleep(2)
+                result = gmaps.places_nearby(
+                    location=(lat, lng),
+                    radius=5000,
+                    type="hair_care",
+                    language="it",
+                    page_token=result["next_page_token"],
+                )
+                _extract_places(result, seen, barbers)
+        except Exception as exc:
+            print(f"Nearby search at ({lat},{lng}) failed: {exc}")
 
     print(f"Fetched {len(barbers)} barbers from Places API")
     _write_cache(BARBER_CACHE, barbers)
     return barbers
+
+
+def _extract_places(result: dict, seen: set, barbers: list[dict]) -> None:
+    """Extract places from an API result, deduplicating by lat/lng."""
+    for place in result.get("results", []):
+        loc = place["geometry"]["location"]
+        key = (round(loc["lat"], 5), round(loc["lng"], 5))
+        if key not in seen:
+            seen.add(key)
+            barbers.append({
+                "name": place.get("name", ""),
+                "address": place.get("vicinity",
+                                     place.get("formatted_address", "")),
+                "lat": loc["lat"],
+                "lng": loc["lng"],
+            })
 
 
 # ===================================================================
