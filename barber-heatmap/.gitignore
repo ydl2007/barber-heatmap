@@ -7,3 +7,6 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# Large grid cache (regenerated on first run)
+cache/grid_*.json
